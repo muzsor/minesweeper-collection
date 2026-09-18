@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>圖示產生器</title>
+<style>
+  body { font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif; margin: 24px; background: #f4f4f4; color: #222; }
+  .row { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-end; }
+  .item { text-align: center; font-size: 13px; }
+  canvas { background: repeating-conic-gradient(#ddd 0 25%, #fff 0 50%) 0 0 / 20px 20px; border: 1px solid #ccc; }
+  a { display: block; margin-top: 6px; }
+  /* 無頭截圖模式：只畫一張、鋪滿視窗、背景透明 */
+  body.only { margin: 0; background: transparent; overflow: hidden; }
+  body.only svg { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<h1>踩地雷合集 圖示</h1>
+<p>圖示是 <code>icons/icon.svg</code>。下面的 PNG 由瀏覽器即時畫出，點連結下載後放回 <code>icons/</code>。<br>
+無頭模式：<code>?only=icon-512.png</code> 會只顯示那一張並鋪滿視窗，配合 Chrome 的 <code>--screenshot</code> 使用。
+只適用 512 的兩張：無頭 Chrome 的視窗最小約 500px 寬，180 與 192 直接截圖會被切掉，請用下載連結，或由 512 那張縮小。</p>
+<div class="row" id="row"></div>
+
+<script type="module">
+// 一般圖示：圓角方形、四角透明
+// bleed（iPhone 主畫面用的 180）：滿版不透明、無圓角，iOS 會自己裁圓角，透明四角反而會變黑邊
+// maskable：滿版無圓角、圖案縮到 80% 安全區
+const SIZES = [
+  { name: 'icon-180.png', size: 180, bleed: true },
+  { name: 'icon-192.png', size: 192 },
+  { name: 'icon-512.png', size: 512 },
+  { name: 'icon-maskable-512.png', size: 512, maskable: true },
+];
+
+const svgText = await (await fetch('../icons/icon.svg')).text();
+
+function variant(spec) {
+  if (spec.bleed) return svgText.replace('rx="112"', 'rx="0"');
+  if (!spec.maskable) return svgText;
+  // maskable：背景鋪滿（rx=0），內容整體縮小置中
+  return svgText
+    .replace('rx="112"', 'rx="0"')
+    .replace('<!-- 背景淡淡的格線，暗示棋盤 -->', '<g transform="translate(51.2 51.2) scale(0.8)">')
+    .replace('</svg>', '</g></svg>');
+}
+
+const only = new URLSearchParams(location.search).get('only');
+if (only) {
+  const spec = SIZES.find((s) => s.name === only) || SIZES[2];
+  document.body.className = 'only';
+  document.body.innerHTML = variant(spec);
+} else {
+  const row = document.getElementById('row');
+  for (const spec of SIZES) {
+    const item = document.createElement('div');
+    item.className = 'item';
+    const canvas = document.createElement('canvas');
+    canvas.width = spec.size;
+    canvas.height = spec.size;
+    canvas.style.width = Math.min(spec.size, 192) + 'px';
+    canvas.style.height = Math.min(spec.size, 192) + 'px';
+    const img = new Image();
+    const blob = new Blob([variant(spec)], { type: 'image/svg+xml' });
+    img.src = URL.createObjectURL(blob);
+    img.onload = () => {
+      canvas.getContext('2d').drawImage(img, 0, 0, spec.size, spec.size);
+      const a = document.createElement('a');
+      a.download = spec.name;
+      a.href = canvas.toDataURL('image/png');
+      a.textContent = `下載 ${spec.name}`;
+      item.appendChild(a);
+    };
+    item.append(canvas, document.createElement('br'), document.createTextNode(`${spec.name} ${spec.size}×${spec.size}`));
+    row.appendChild(item);
+  }
+}
+</script>
+</body>
+</html>

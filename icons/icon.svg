@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f7d4f"/>
+      <stop offset="1" stop-color="#1b4a2e"/>
+    </linearGradient>
+    <radialGradient id="ball" cx="0.38" cy="0.35" r="0.7">
+      <stop offset="0" stop-color="#5a5f66"/>
+      <stop offset="0.55" stop-color="#23262b"/>
+      <stop offset="1" stop-color="#0d0e10"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- 背景淡淡的格線，暗示棋盤 -->
+  <g stroke="rgba(255,255,255,0.08)" stroke-width="4">
+    <path d="M0 128H512M0 256H512M0 384H512M128 0V512M256 0V512M384 0V512"/>
+  </g>
+  <!-- 地雷：八根刺 -->
+  <g transform="translate(256 268)" fill="#15171a">
+    <rect x="-14" y="-190" width="28" height="380" rx="8"/>
+    <rect x="-190" y="-14" width="380" height="28" rx="8"/>
+    <rect x="-14" y="-190" width="28" height="380" rx="8" transform="rotate(45)"/>
+    <rect x="-14" y="-190" width="28" height="380" rx="8" transform="rotate(-45)"/>
+  </g>
+  <circle cx="256" cy="268" r="132" fill="url(#ball)"/>
+  <circle cx="212" cy="222" r="34" fill="rgba(255,255,255,0.85)"/>
+  <!-- 引信頭的小紅旗，點出「插旗」 -->
+  <g transform="translate(340 96)">
+    <rect x="-5" y="0" width="10" height="92" rx="4" fill="#f3f3f3"/>
+    <path d="M5 4 L78 30 L5 58 Z" fill="#e53935"/>
+  </g>
+</svg>

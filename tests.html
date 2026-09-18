@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>踩地雷合集 單元測試</title>
+<style>
+  body { font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif; margin: 24px; color: #222; background: #fafafa; }
+  h1 { font-size: 20px; }
+  #summary { font-size: 16px; font-weight: 700; margin: 12px 0; }
+  .pass { color: #1f7a3f; }
+  .fail { color: #b01c1c; }
+  table { border-collapse: collapse; width: 100%; max-width: 900px; font-size: 14px; }
+  td { padding: 5px 8px; border-bottom: 1px solid #e4e4e4; vertical-align: top; }
+  td:first-child { width: 60px; font-weight: 700; }
+  pre { margin: 2px 0 0; font-size: 12px; color: #666; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>踩地雷合集 單元測試</h1>
+<div id="summary">執行中…</div>
+<table id="results"></table>
+
+<script type="module">
+import { mulberry32, randomSeed, MAX_SEED, dailySeed, todayString } from './js/rng.js';
+import { Board, HIDDEN, REVEALED, FLAG, QUESTION } from './js/board.js';
+import { Game } from './js/engine.js';
+import { Classic, LEVELS, maxMines } from './js/games/classic.js';
+
+const results = [];
+function test(name, fn) {
+  try {
+    fn();
+    results.push({ name, ok: true });
+  } catch (e) {
+    results.push({ name, ok: false, err: e && e.message ? e.message : String(e) });
+  }
+}
+function eq(a, b, msg = '') {
+  const sa = JSON.stringify(a), sb = JSON.stringify(b);
+  if (sa !== sb) throw new Error(`${msg} 期望 ${sb}，實際 ${sa}`);
+}
+function ok(v, msg = '') {
+  if (!v) throw new Error(msg || '期望為真');
+}
+const newGame = (options, seed = 1) => new Classic(seed, options).boot();
+// 指定雷位的小盤面（測試用）
+function board(w, h, mines) {
+  const b = new Board(w, h, mines.length);
+  b.setMines(mines);
+  return b;
+}
+
+// ---------- 隨機數 ----------
+test('mulberry32：相同 seed 產生相同序列', () => {
+  const a = mulberry32(12345), b = mulberry32(12345);
+  for (let i = 0; i < 20; i++) eq(a(), b());
+});
+test('randomSeed 落在 1 到 2^31-1', () => {
+  for (let i = 0; i < 2000; i++) {
+    const s = randomSeed();
+    ok(Number.isInteger(s) && s >= 1 && s <= MAX_SEED, `得到 ${s}`);
+  }
+});
+test('每日挑戰 seed：同一天相同、不同天不同、落在範圍內', () => {
+  eq(dailySeed('2026-09-18'), dailySeed('2026-09-18'));
+  ok(dailySeed('2026-09-18') !== dailySeed('2026-09-19'));
+  const s = dailySeed('2026-01-01');
+  ok(s >= 1 && s <= MAX_SEED);
+  ok(/^\d{4}-\d{2}-\d{2}$/.test(todayString(new Date(2026, 8, 5))));
+  eq(todayString(new Date(2026, 8, 5)), '2026-09-05');
+});
+
+// ---------- 棋盤 ----------
+test('Board：鄰居數 角 3、邊 5、中 8', () => {
+  const b = new Board(5, 5, 0);
+  eq(b.nb[0].length, 3);
+  eq(b.nb[2].length, 5);
+  eq(b.nb[12].length, 8);
+});
+test('Board：佈雷數量正確且同 seed 同盤面', () => {
+  const a = new Board(16, 16, 40); a.placeMines(mulberry32(7));
+  const b = new Board(16, 16, 40); b.placeMines(mulberry32(7));
+  eq(a.mine.reduce((n, v) => n + v, 0), 40);
+  eq(Array.from(a.mine), Array.from(b.mine));
+  const c = new Board(16, 16, 40); c.placeMines(mulberry32(8));
+  ok(Array.from(a.mine).join('') !== Array.from(c.mine).join(''), '不同 seed 應不同');
+});
+test('Board：鄰接數正確', () => {
+  const b = board(3, 3, [0]);
+  eq(Array.from(b.count), [0, 1, 0, 1, 1, 0, 0, 0, 0]);
+});
+test('Board：第一下踩到雷會把雷搬到第一個空格', () => {
+  const b = board(3, 3, [0, 4]);
+  ok(b.ensureSafe(4), '應有搬雷');
+  eq(b.mine[4], 0);
+  eq(b.mine[1], 1, '搬到 index 1（第一個沒有雷的格子）');
+  ok(b.relocated);
+  eq(b.count[4], 2, '鄰接數要重算');
+  ok(!b.ensureSafe(8), '安全格不需搬');
+});
+test('Board：翻開 0 的格子會洪水填充整片空地', () => {
+  const b = board(3, 3, [0]);
+  ok(!b.reveal(8), '不該踩雷');
+  eq(b.revealed, 8);
+  ok(b.isWon());
+  eq(b.state[0], HIDDEN, '雷不會被翻開');
+});
+test('Board：翻到雷就輸', () => {
+  const b = board(3, 3, [0]);
+  ok(b.reveal(0));
+  ok(b.isLost());
+  eq(b.exploded, 0);
+  ok(!b.isWon());
+});
+test('Board：插旗循環，問號可開關', () => {
+  const b = board(3, 3, [0]);
+  b.toggleFlag(1, false); eq(b.state[1], FLAG); eq(b.flags, 1); eq(b.minesLeft(), 0);
+  b.toggleFlag(1, false); eq(b.state[1], HIDDEN); eq(b.flags, 0);
+  b.toggleFlag(1, true); eq(b.state[1], FLAG);
+  b.toggleFlag(1, true); eq(b.state[1], QUESTION); eq(b.flags, 0);
+  b.toggleFlag(1, true); eq(b.state[1], HIDDEN);
+  b.reveal(8);
+  ok(!b.toggleFlag(8, false), '已翻開的不能插旗');
+});
+test('Board：chord 旗數正確就翻開其餘格子', () => {
+  const b = board(3, 3, [0, 2]);
+  b.reveal(4);
+  eq(b.count[4], 2);
+  ok(!b.canChord(4), '旗不夠不能 chord');
+  b.toggleFlag(0); b.toggleFlag(2);
+  ok(b.canChord(4));
+  ok(!b.chord(4), '不該踩雷');
+  ok(b.isWon());
+});
+test('Board：chord 旗插錯會踩雷', () => {
+  const b = board(3, 3, [0, 2]);
+  b.reveal(4);
+  b.toggleFlag(0); b.toggleFlag(1);
+  ok(b.chord(4), '應踩到 index 2 的雷');
+  ok(b.isLost());
+});
+test('Board：3BV', () => {
+  eq(board(3, 3, [0]).compute3BV(), 1, '一片空地算 1');
+  eq(board(3, 1, [1]).compute3BV(), 2, '兩個孤立數字各算 1');
+  eq(board(4, 1, [1, 2]).compute3BV(), 2);
+});
+test('Board：快照往返（含搬雷）', () => {
+  const b = board(3, 3, [0, 4]);
+  b.ensureSafe(4);
+  b.reveal(4); b.toggleFlag(1);
+  const snap = b.serializeState();
+  const c = board(3, 3, [0, 4]);
+  c.restoreState(snap);
+  eq(Array.from(c.mine), Array.from(b.mine));
+  eq(Array.from(c.state), Array.from(b.state));
+  eq(c.revealed, b.revealed); eq(c.flags, b.flags);
+  // 還原到沒搬雷的快照要回到 seed 雷位
+  c.restoreState({ st: '000000000', ex: -1, mn: null });
+  eq(Array.from(c.mine), [1, 0, 0, 0, 1, 0, 0, 0, 0]);
+  ok(!c.relocated);
+});
+
+// ---------- 經典踩地雷 ----------
+test('Classic：三個難度尺寸與 Windows 相同', () => {
+  const g = newGame({ level: 'beginner' });
+  eq([g.board.w, g.board.h, g.board.mines], [9, 9, 10]);
+  const e = newGame({ level: 'expert' });
+  eq([e.board.w, e.board.h, e.board.mines], [30, 16, 99]);
+  eq(g.subtitle(), '初級 9×9 · 10 雷');
+});
+test('Classic：自訂尺寸會被限制在範圍內', () => {
+  const g = newGame({ level: 'custom', w: 100, h: 2, mines: 9999 });
+  eq([g.options.w, g.options.h], [40, 5]);
+  eq(g.options.mines, maxMines(40, 5));
+  eq(g.levelKey, 'custom');
+  const h = newGame({ level: 'nonsense', w: 8, h: 8, mines: 10 });
+  eq(h.options.level, 'custom');
+});
+test('Classic：第一下永遠不會踩雷', () => {
+  for (let seed = 1; seed <= 30; seed++) {
+    const g = newGame({ level: 'beginner' }, seed);
+    const mi = g.board.mine.indexOf(1);
+    ok(g.reveal(mi));
+    ok(!g.lost, `seed ${seed} 第一下踩雷了`);
+    ok(g.board.relocated);
+    eq(g.board.mine.reduce((n, v) => n + v, 0), 10, '雷數不變');
+  }
+});
+test('Classic：踩雷觸發 lose 事件、贏觸發 win 事件', () => {
+  const g = newGame({ level: 'beginner' }, 3);
+  let lost = false, won = false;
+  g.on('lose', () => (lost = true));
+  g.on('win', () => (won = true));
+  g.reveal(g.board.mine.indexOf(0)); // 先安全開局
+  const mi = g.board.mine.indexOf(1);
+  g.reveal(mi);
+  ok(lost && g.lost && g.over, '應該輸');
+  ok(!g.reveal(g.board.mine.indexOf(0)), '結束後不能再動');
+  // 贏
+  const w = newGame({ level: 'beginner' }, 3);
+  w.on('win', () => (won = true));
+  for (let i = 0; i < w.board.n; i++) if (!w.board.mine[i] && w.board.canOpen(i)) w.reveal(i);
+  ok(won && w.won);
+});
+test('Classic：復原可以救回踩雷，重來回到開頭', () => {
+  const g = newGame({ level: 'beginner' }, 5);
+  g.reveal(g.board.mine.indexOf(0));
+  const before = JSON.stringify(g.snapshot());
+  g.reveal(g.board.mine.indexOf(1));
+  ok(g.lost);
+  ok(g.undo());
+  ok(!g.lost);
+  eq(JSON.stringify(g.snapshot()), before);
+  ok(g.restart());
+  eq(g.moves, 0);
+  eq(g.board.revealed, 0);
+  eq(JSON.stringify(g.snapshot()), JSON.stringify(g.initialSnap));
+});
+test('Classic：存檔以動作日誌重播（含第一下搬雷與問號旗）', () => {
+  const g = newGame({ level: 'intermediate' }, 11);
+  const b = g.board;
+  g.reveal(b.mine.indexOf(1)); // 第一下踩到雷 → 搬雷
+  let n = 0;
+  for (let i = 0; i < b.n && n < 5; i++) if (!b.mine[i] && b.canOpen(i)) { g.reveal(i); n++; }
+  const hidden = [];
+  for (let i = 0; i < b.n && hidden.length < 3; i++) if (b.canOpen(i)) hidden.push(i);
+  g.flag(hidden[0], false);
+  g.flag(hidden[1], true); g.flag(hidden[1], true); // 旗 → 問號
+  const data = JSON.parse(JSON.stringify(g.serialize()));
+  ok(Array.isArray(data.actions) && data.actions.length === g.moves);
+  const g2 = Game.deserialize(Classic, data);
+  eq(JSON.stringify(g2.snapshot()), JSON.stringify(g.snapshot()));
+  eq(g2.moves, g.moves);
+  ok(g2.board.relocated);
+  ok(g2.canUndo());
+  while (g2.canUndo()) g2.undo();
+  eq(JSON.stringify(g2.snapshot()), JSON.stringify(g.initialSnap), '一路復原應回到開頭');
+});
+test('Classic：日誌損壞時退回最終快照', () => {
+  const g = newGame({ level: 'beginner' }, 12);
+  g.reveal(g.board.mine.indexOf(0));
+  const data = JSON.parse(JSON.stringify(g.serialize()));
+  data.actions.push({ t: 'r', i: g.board.mine.indexOf(1) }); // 多塞一步踩雷，與快照不符
+  const g2 = Game.deserialize(Classic, data);
+  eq(JSON.stringify(g2.snapshot()), JSON.stringify(g.snapshot()));
+  ok(!g2.canUndo());
+  ok(!g2.lost);
+});
+test('Classic：存檔大小遠小於快照堆疊', () => {
+  const g = newGame({ level: 'expert' }, 21);
+  const b = g.board;
+  let n = 0;
+  for (let i = 0; i < b.n && n < 60; i++) if (!b.mine[i] && b.canOpen(i)) { g.reveal(i); n++; }
+  const size = JSON.stringify(g.serialize()).length;
+  const snaps = JSON.stringify(g.undoStack).length;
+  ok(g.moves >= 20, '至少 20 步，實際 ' + g.moves);
+  ok(size * 5 < snaps, `存檔 (${size}) 應遠小於快照堆疊 (${snaps})`);
+});
+test('Classic：提示能找出確定安全與確定是雷的格子', () => {
+  const g = newGame({ level: 'beginner' }, 1);
+  g.board.setMines([0, 2]); // 只有左上角兩顆雷，中間夾著 index 1
+  g.initialSnap = g.snapshot();
+  eq(g.hint(), null, '還沒開局沒有提示');
+  g.reveal(1); // 2 的格子，周圍還有 5 格未翻，資訊不足
+  eq(g.hint(), null, '資訊不足時不該亂猜');
+  g.reveal(9);
+  g.reveal(10);
+  g.reveal(11); // 現在 index 1 周圍只剩 0 和 2 未翻，剛好等於數字 2 → 兩格都是雷
+  const h = g.hint();
+  ok(h && h.mine === 0, `應指出 index 0 是雷，得到 ${JSON.stringify(h)}`);
+  g.flag(0);
+  g.flag(2); // index 9 是 1，旗數已滿 → 其餘未翻的 18 安全
+  const h2 = g.hint();
+  ok(h2 && h2.safe === 18, `旗數等於數字時其餘格子安全，得到 ${JSON.stringify(h2)}`);
+});
+test('Classic：局號就是 seed，fromDeal 得到同一盤', () => {
+  const a = Classic.fromDeal(4242, { level: 'expert' }).boot();
+  const b = newGame({ level: 'expert' }, 4242);
+  eq(Array.from(a.board.mine), Array.from(b.board.mine));
+  eq(a.dealNumber, 4242);
+});
+
+// ---------- 顯示 ----------
+const table = document.getElementById('results');
+let pass = 0;
+for (const r of results) {
+  if (r.ok) pass++;
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td class="${r.ok ? 'pass' : 'fail'}">${r.ok ? 'PASS' : 'FAIL'}</td><td>${r.name}${r.ok ? '' : `<pre>${r.err}</pre>`}</td>`;
+  table.appendChild(tr);
+}
+const s = document.getElementById('summary');
+s.textContent = `${pass} / ${results.length} 通過`;
+s.className = pass === results.length ? 'pass' : 'fail';
+window.__testResults = results;
+</script>
+</body>
+</html>

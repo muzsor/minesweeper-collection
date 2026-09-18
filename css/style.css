@@ -1,0 +1,398 @@
+:root {
+  /* 底部安全區：Safari 模式照系統值（含浮動工具列）；獨立模式 iOS 27 會多留一段工具列空間，上限收到 40px */
+  --safe-bottom: env(safe-area-inset-bottom);
+  --table: #23613c;
+  --bar: rgba(0, 0, 0, 0.24);
+  --accent: #ffd54a;
+}
+:root[data-table='blue'] { --table: #234a73; }
+:root[data-table='gray'] { --table: #2b2e33; }
+:root[data-table='purple'] { --table: #45305f; }
+
+/* 獨立模式（加入主畫面）：iOS 27 回報的底部安全區含工具列空間，收到 40px 就夠避開主畫面指示條 */
+.standalone { --safe-bottom: min(env(safe-area-inset-bottom), 40px); }
+@media (display-mode: standalone) {
+  :root { --safe-bottom: min(env(safe-area-inset-bottom), 40px); }
+}
+
+/* iPhone Safari 無視 user-scalable=no，但會尊重 touch-action：
+   pan-x pan-y 只允許捲動，雙指縮放與雙擊放大都關掉。touch-action 不會繼承，所以每個元素都設 */
+* { box-sizing: border-box; touch-action: pan-x pan-y; }
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--table);
+  color: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', 'Segoe UI', sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  position: fixed;
+  inset: 0;
+  overscroll-behavior: none;
+  touch-action: pan-x pan-y;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+button { font-family: inherit; cursor: pointer; }
+button:disabled { opacity: 0.4; cursor: default; }
+.hidden { display: none !important; }
+
+.screen { position: absolute; inset: 0; display: flex; flex-direction: column; }
+
+/* ---- 頂部列 ---- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: calc(env(safe-area-inset-top) + 4px) calc(env(safe-area-inset-right) + 10px) 4px calc(env(safe-area-inset-left) + 8px);
+  background: var(--bar);
+}
+.topbar h1 { font-size: 20px; margin: 0; flex: 1; display: flex; align-items: center; gap: 8px; }
+.topbar .logo { width: 28px; height: 28px; border-radius: 7px; flex: none; }
+button.icon {
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 24px;
+  line-height: 1;
+  padding: 4px 8px;
+}
+.title { display: flex; flex-direction: column; line-height: 1.15; flex: 1; min-width: 0; }
+.title span:first-child { font-weight: 700; font-size: 16px; }
+#g-sub { font-size: 12px; opacity: 0.75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hud { margin-left: auto; display: flex; gap: 12px; font-variant-numeric: tabular-nums; font-size: 14px; opacity: 0.92; white-space: nowrap; }
+.no-timer #hud-time { display: none; }
+
+/* ---- 首頁 ---- */
+#game-list {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px calc(env(safe-area-inset-right) + 12px) 12px calc(env(safe-area-inset-left) + 12px);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  align-content: start;
+}
+.gcard { background: rgba(255, 255, 255, 0.1); border-radius: 14px; padding: 14px; }
+.gcard-main { cursor: pointer; }
+.gcard-title { font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.gcard-title .en { font-size: 13px; opacity: 0.7; font-weight: 400; }
+.chip { font-size: 11px; background: var(--accent); color: #222; padding: 2px 8px; border-radius: 10px; font-weight: 700; }
+.chip.done { background: #3ddc84; }
+.chip.failed { background: #ff8a80; }
+.gcard-desc { font-size: 14px; opacity: 0.88; margin: 6px 0; line-height: 1.45; }
+.gcard-stats { font-size: 13px; opacity: 0.75; }
+.gcard-foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.gcard-foot .spacer { flex: 1; }
+.seg { display: inline-flex; border: 1px solid rgba(255, 255, 255, 0.45); border-radius: 8px; overflow: hidden; }
+.seg button { background: none; border: none; color: inherit; padding: 6px 12px; font-size: 14px; }
+.seg button.on { background: rgba(255, 255, 255, 0.3); font-weight: 700; }
+.btn { background: rgba(255, 255, 255, 0.2); border: none; color: #fff; padding: 8px 14px; border-radius: 8px; font-size: 14px; }
+.btn.primary { background: var(--accent); color: #222; font-weight: 700; }
+.btn.small { padding: 6px 10px; font-size: 13px; }
+.home-foot {
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.35;
+  opacity: 0.6;
+  padding: 4px 0 max(4px, calc(var(--safe-bottom) - 12px));
+}
+.standalone .install-hint { display: none; }
+@media (display-mode: standalone) {
+  .install-hint { display: none; }
+}
+
+/* ---- 遊戲畫面 ---- */
+.game-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+/* 棋盤的捲動容器：盤面放得下就置中，放不下就可以拖曳捲動 */
+#table {
+  flex: 1;
+  position: relative;
+  overflow: auto;
+  display: flex;
+  padding: 6px;
+  min-height: 0;
+  -webkit-overflow-scrolling: touch;
+  margin: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left);
+}
+.actions {
+  display: flex;
+  justify-content: space-around;
+  background: var(--bar);
+  padding: 4px 0 calc(var(--safe-bottom) + 4px);
+}
+.actions button {
+  background: none;
+  border: none;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-size: 22px;
+  line-height: 1.1;
+  padding: 4px 8px;
+  min-width: 56px;
+  border-radius: 10px;
+}
+.actions button small { font-size: 11px; margin-top: 2px; opacity: 0.85; }
+/* 插旗模式開著時按鈕亮起 */
+.actions button.on { background: rgba(255, 213, 74, 0.25); box-shadow: inset 0 0 0 2px var(--accent); }
+.actions button.on small { color: var(--accent); opacity: 1; font-weight: 700; }
+@media (orientation: landscape) {
+  .game-body { flex-direction: row; }
+  .actions {
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+    padding: 6px calc(env(safe-area-inset-right) + 2px) calc(var(--safe-bottom) + 6px) 2px;
+  }
+  .actions button { min-width: 52px; padding: 4px 6px; }
+  #table { margin-right: 0; }
+  /* 慣用左手：動作列換到左邊，安全區內距也跟著換邊 */
+  .hand-left .game-body { flex-direction: row-reverse; }
+  .hand-left .actions { padding: 6px 2px calc(var(--safe-bottom) + 6px) calc(env(safe-area-inset-left) + 2px); }
+  .hand-left #table { margin-left: 0; margin-right: env(safe-area-inset-right); }
+}
+
+/* ---- 棋盤 ---- */
+/* touch-action: none：棋盤上的拖曳捲動與雙指縮放由 render.js 自己處理，瀏覽器不介入；
+   頁面其他地方仍是 pan-x pan-y，所以雙擊放大在整個 App 都關著 */
+.board,
+.board * { touch-action: none; }
+.board {
+  --cs: 32px;
+  display: grid;
+  grid-auto-rows: var(--cs);
+  margin: auto; /* 放得下時置中；放不下時 margin 變 0，從左上開始捲 */
+  flex: none;
+  background: #8b959e;
+  border: 3px solid #a3adb6;
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+.cell {
+  width: var(--cs);
+  height: var(--cs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: calc(var(--cs) * 0.55);
+  line-height: 1;
+  background: #c9d1d9;
+  border: 1px solid #8f99a3;
+  border-top-color: #eef2f5;
+  border-left-color: #eef2f5;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.cell.open {
+  background: #e9edf1;
+  border: 1px solid #b9c2ca;
+  cursor: default;
+}
+.cell.n1 { color: #1e5bc6; }
+.cell.n2 { color: #2a8a3a; }
+.cell.n3 { color: #d22f2f; }
+.cell.n4 { color: #1b2b7a; }
+.cell.n5 { color: #7a1c1c; }
+.cell.n6 { color: #158a8a; }
+.cell.n7 { color: #222; }
+.cell.n8 { color: #6b6b6b; }
+.cell.flag, .cell.mine { font-size: calc(var(--cs) * 0.6); }
+.cell.q { color: #333; }
+.cell.mine { background: #d9dee3; }
+.cell.boom { background: #e5453c; }
+.cell.wrong { background: #f2c4c4; color: #b71c1c; font-size: calc(var(--cs) * 0.6); }
+/* 插旗模式：未翻開的格子游標換成十字，提醒點下去是插旗 */
+.board.flag-mode .cell:not(.open) { cursor: cell; }
+.board.over .cell { cursor: default; }
+
+.cell.hint-safe { animation: hintsafe 1.6s ease; }
+.cell.hint-mine { animation: hintmine 1.6s ease; }
+@keyframes hintsafe {
+  0%, 100% { box-shadow: none; }
+  15%, 85% { box-shadow: inset 0 0 0 3px #3ddc84, 0 0 12px 3px rgba(61, 220, 132, 0.8); }
+}
+@keyframes hintmine {
+  0%, 100% { box-shadow: none; }
+  15%, 85% { box-shadow: inset 0 0 0 3px #ff5252, 0 0 12px 3px rgba(255, 82, 82, 0.8); }
+}
+.cell.nudge { animation: nudge 0.3s ease; }
+@keyframes nudge {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-3px); }
+  75% { transform: translateX(3px); }
+}
+.board.won .cell.open { animation: pop 0.5s ease var(--d, 0ms) both; }
+@keyframes pop {
+  0%, 100% { transform: scale(1); }
+  40% { transform: scale(1.18); background: #fff3b0; }
+}
+
+/* ---- 資料備份 ---- */
+.modal-body textarea {
+  width: 100%;
+  font: 16px/1.4 ui-monospace, Menlo, Consolas, monospace; /* iPhone 對焦小於 16px 的輸入框會放大整頁 */
+  padding: 8px;
+  border: 1px solid #bbb;
+  border-radius: 8px;
+  resize: vertical;
+  word-break: break-all;
+}
+/* 全頁關了文字選取（body 的 user-select: none），輸入欄位要開回來，iPhone 才能長按選取、全選、貼上 */
+.modal-body textarea,
+.modal-body input {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+.row-btns { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.row-btns .btn,
+.modal-body .btn { background: #eee; color: #222; }
+
+/* ---- 狀態列取色 ---- */
+/* iOS 26 起獨立模式的狀態列顏色取樣最上方 fixed 元素的 background-color（不再讀 theme-color）。
+   放一條 1px 的 fixed 元素在頂端，顏色與標題列相同，所以看不見；在對話框底下、不吃點擊 */
+#statusbar-tint {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  pointer-events: none;
+  z-index: 10;
+  background-color: var(--table);
+}
+
+/* ---- 對話框 ---- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5000;
+  padding: 16px;
+}
+.modal {
+  background: #fff;
+  color: #222;
+  border-radius: 16px;
+  max-width: 440px;
+  width: 100%;
+  max-height: 88vh;
+  max-height: 88dvh; /* iOS Safari 工具列會吃掉 vh，支援的瀏覽器改用動態視口 */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+}
+.modal h2 { margin: 0; padding: 16px 18px 6px; font-size: 19px; }
+.modal-body { padding: 4px 18px 12px; overflow-y: auto; -webkit-overflow-scrolling: touch; font-size: 15px; line-height: 1.55; }
+.modal-body h3 { font-size: 15px; margin: 12px 0 4px; color: #2f7d4f; }
+.modal-body p { margin: 4px 0; }
+.modal-body ul { padding-left: 20px; margin: 4px 0; }
+.modal-body li { margin: 3px 0; }
+.modal-body input.deal-input,
+.modal-body input.num-input {
+  width: 100%;
+  font-size: 18px; /* 16px 以上，iPhone 對焦才不會放大 */
+  padding: 10px;
+  border: 1px solid #bbb;
+  border-radius: 8px;
+  margin-top: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.modal-body input.invalid,
+.modal-body textarea.invalid { border-color: #c8242c; outline-color: #c8242c; }
+.field-err { color: #c8242c; font-size: 13px; min-height: 1.3em; margin: 6px 0 0; }
+.custom-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 6px; }
+.custom-grid label { font-size: 13px; color: #555; display: flex; flex-direction: column; gap: 2px; }
+.custom-grid input { margin-top: 2px !important; }
+.modal-buttons {
+  display: flex;
+  gap: 8px;
+  padding: 10px 18px 16px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.modal-buttons .btn { background: #eee; color: #222; padding: 10px 16px; font-size: 15px; }
+.modal-buttons .btn.primary { background: #2f7d4f; color: #fff; }
+.menu-list button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid #eee;
+  padding: 13px 4px;
+  font-size: 16px;
+  color: #222;
+}
+.menu-list button:last-child { border-bottom: none; }
+.setting-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; gap: 10px; }
+.setting-row .seg { border-color: #bbb; color: #222; }
+.setting-row .seg button.on { background: #2f7d4f; color: #fff; }
+.note { font-size: 13px; color: #777; margin-top: 10px; }
+.deal-note { margin: 0 0 6px; }
+.deal-code {
+  margin: 10px 0 4px;
+  text-align: center;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  font-variant-numeric: tabular-nums;
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+.deal-copy-msg { text-align: center; margin: 0 0 6px; min-height: 1.3em; }
+.switch { position: relative; display: inline-block; width: 50px; height: 30px; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span { position: absolute; inset: 0; background: #ccc; border-radius: 15px; transition: 0.2s; }
+.switch span::before { content: ''; position: absolute; width: 24px; height: 24px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: 0.2s; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3); }
+.switch input:checked + span { background: #2f7d4f; }
+.switch input:checked + span::before { transform: translateX(20px); }
+table.stats { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.stats td { padding: 5px 4px; border-bottom: 1px solid #f0f0f0; }
+table.stats td:nth-child(odd) { color: #777; }
+table.stats td:nth-child(even) { font-weight: 600; }
+.win-stats div { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #eee; }
+.win-stats span { color: #777; }
+.win-stats em { font-style: normal; color: #c8242c; font-size: 12px; margin-left: 4px; }
+
+/* ---- 提示訊息 ---- */
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--safe-bottom) + 84px);
+  transform: translateX(-50%);
+  background: rgba(20, 20, 20, 0.92);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 12px;
+  font-size: 15px;
+  z-index: 6000;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+  max-width: 90vw;
+}
+#toast.show { opacity: 1; pointer-events: auto; }
+#toast button { background: var(--accent); color: #222; border: none; padding: 6px 12px; border-radius: 8px; font-weight: 700; font-size: 14px; }
+@media (orientation: landscape) {
+  #toast { bottom: 16px; }
+}
