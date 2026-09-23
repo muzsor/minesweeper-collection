@@ -1,5 +1,6 @@
 import { Game } from '../engine.js';
 import { Board, REVEALED, FLAG } from '../board.js';
+import { deduce, OPEN, MINE } from '../solver.js';
 
 // 標準三級難度，與 Windows 相同
 export const LEVELS = {
@@ -22,32 +23,43 @@ export class Classic extends Game {
     en: 'Classic',
     desc: '翻開所有沒有雷的格子。數字是周圍八格的雷數，長按或插旗模式標記地雷。',
   };
+  // 格形與難度表，子類別可覆寫（蜂巢模式是六角格、另一組尺寸）
+  static shape = 'square';
+  static levels = LEVELS;
+  // 自訂尺寸的雷數上限，子類別可覆寫（無猜模式比較低）
+  static maxMinesFor(w, h) {
+    return maxMines(w, h);
+  }
+  // 由難度選項算出實際的寬、高、雷數（自訂尺寸會被限制在範圍內）
+  static resolveSize(o) {
+    const lv = this.levels[o.level];
+    if (lv) return { level: o.level, w: lv.w, h: lv.h, mines: lv.mines };
+    const w = clamp(o.w, CUSTOM_LIMITS.minW, CUSTOM_LIMITS.maxW);
+    const h = clamp(o.h, CUSTOM_LIMITS.minH, CUSTOM_LIMITS.maxH);
+    const mines = clamp(o.mines, CUSTOM_LIMITS.minMines, this.maxMinesFor(w, h));
+    return { level: 'custom', w, h, mines };
+  }
 
   init() {
-    const o = this.options;
-    const lv = LEVELS[o.level];
-    let w, h, mines;
-    if (lv) {
-      ({ w, h, mines } = lv);
-    } else {
-      o.level = 'custom';
-      w = clamp(o.w, CUSTOM_LIMITS.minW, CUSTOM_LIMITS.maxW);
-      h = clamp(o.h, CUSTOM_LIMITS.minH, CUSTOM_LIMITS.maxH);
-      mines = clamp(o.mines, CUSTOM_LIMITS.minMines, maxMines(w, h));
-    }
     // 把實際尺寸寫回 options，存檔與局號分享時才知道是哪一種盤
-    o.w = w;
-    o.h = h;
-    o.mines = mines;
-    this.board = new Board(w, h, mines);
+    const size = this.constructor.resolveSize(this.options);
+    Object.assign(this.options, size);
+    this.board = new Board(size.w, size.h, size.mines, this.constructor.shape);
+    this.layMines();
+  }
+  layMines() {
     this.board.placeMines(this.rng);
+  }
+  // 無猜模式的起點格；經典模式沒有
+  get startCell() {
+    return -1;
   }
 
   get levelKey() {
-    return LEVELS[this.options.level] ? this.options.level : 'custom';
+    return this.constructor.levels[this.options.level] ? this.options.level : 'custom';
   }
   levelLabel() {
-    const lv = LEVELS[this.options.level];
+    const lv = this.constructor.levels[this.options.level];
     return lv ? lv.label : '自訂';
   }
   subtitle() {
@@ -106,21 +118,24 @@ export class Classic extends Game {
     }
   }
 
-  // 提示：只用「單格推論」找一格確定安全或確定是雷的格子，找不到就回傳 null（表示要猜）
-  // 先找安全格，因為翻開安全格才會有新資訊
+  // 提示：用完整的求解器（單格、兩格、全域計數），一次給「一步推理」的結果。
+  // 只看已翻開的數字，不信任玩家的旗（旗可能插錯）。這一步推得出安全格就給安全格（翻開才有新資訊）；
+  // 只推得出雷，就給一顆還沒插旗的雷（App 會直接幫忙插旗），下一次提示再利用它推出安全格。
+  // 推出的雷若玩家都已經插好旗，就記下來繼續推下一步。找不到就回傳 null，表示真的必須猜
   hint() {
     const b = this.board;
     if (b.revealed === 0) return null;
-    let mineHint = null;
-    for (let i = 0; i < b.n; i++) {
-      if (b.state[i] !== REVEALED || b.count[i] === 0) continue;
-      const hidden = b.nb[i].filter((j) => b.canOpen(j));
-      if (!hidden.length) continue;
-      const flags = b.flagsAround(i);
-      if (flags === b.count[i]) return { safe: hidden[0] };
-      if (!mineHint && flags + hidden.length === b.count[i]) mineHint = { mine: hidden[0] };
+    const know = new Uint8Array(b.n);
+    for (let i = 0; i < b.n; i++) if (b.state[i] === REVEALED && !b.mine[i]) know[i] = OPEN;
+    for (let guard = 0; guard < b.n; guard++) {
+      const d = deduce(b, know, b.mines, { nodeLimit: 300000 });
+      if (d.safe.length) return { safe: d.safe[0] };
+      const unflagged = d.mines.find((m) => b.state[m] !== FLAG);
+      if (unflagged != null) return { mine: unflagged };
+      if (!d.mines.length) break;
+      for (const m of d.mines) know[m] = MINE;
     }
-    return mineHint;
+    return null;
   }
 
   progress() {
@@ -131,12 +146,5 @@ export class Classic extends Game {
   }
   minesLeft() {
     return this.board.minesLeft();
-  }
-  // 提示用：目前有沒有插錯的旗（給提示按鈕判斷要不要提醒）
-  wrongFlags() {
-    const b = this.board;
-    let n = 0;
-    for (let i = 0; i < b.n; i++) if (b.state[i] === FLAG && !b.mine[i]) n++;
-    return n;
   }
 }

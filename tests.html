@@ -25,6 +25,9 @@ import { mulberry32, randomSeed, MAX_SEED, dailySeed, todayString } from './js/r
 import { Board, HIDDEN, REVEALED, FLAG, QUESTION } from './js/board.js';
 import { Game } from './js/engine.js';
 import { Classic, LEVELS, maxMines } from './js/games/classic.js';
+import { NoGuess, noGuessMaxMines } from './js/games/noguess.js';
+import { Hex, HEX_LEVELS } from './js/games/hex.js';
+import { deduce, solveFrom, generateNoGuess, encodeLayout, decodeLayout, UNKNOWN, OPEN, MINE } from './js/solver.js';
 
 const results = [];
 function test(name, fn) {
@@ -256,28 +259,227 @@ test('Classic：存檔大小遠小於快照堆疊', () => {
   ok(g.moves >= 20, '至少 20 步，實際 ' + g.moves);
   ok(size * 5 < snaps, `存檔 (${size}) 應遠小於快照堆疊 (${snaps})`);
 });
-test('Classic：提示能找出確定安全與確定是雷的格子', () => {
+test('Classic：提示只給確定的格子，而且一定是對的', () => {
+  eq(newGame({ level: 'beginner' }, 1).hint(), null, '還沒開局沒有提示');
+  // 隨機開局，一路照提示走：提示的安全格一定不是雷、提示的雷一定是雷
+  let hints = 0;
+  for (let seed = 1; seed <= 15; seed++) {
+    const g = newGame({ level: 'intermediate' }, seed);
+    const b = g.board;
+    g.reveal(b.mine.indexOf(0));
+    for (let step = 0; step < 60 && !g.over; step++) {
+      const h = g.hint();
+      if (!h) break;
+      hints++;
+      if (h.safe != null) {
+        ok(!b.mine[h.safe], `seed ${seed} 提示的安全格 ${h.safe} 其實是雷`);
+        g.reveal(h.safe);
+      } else {
+        ok(b.mine[h.mine], `seed ${seed} 提示的雷 ${h.mine} 其實安全`);
+        g.flag(h.mine, false);
+      }
+    }
+    ok(!g.lost, `seed ${seed} 照提示走卻踩雷`);
+  }
+  ok(hints > 50, '應該有足夠多的提示可驗證，實際 ' + hints);
+});
+test('Classic：提示不信任玩家插錯的旗', () => {
   const g = newGame({ level: 'beginner' }, 1);
-  g.board.setMines([0, 2]); // 只有左上角兩顆雷，中間夾著 index 1
+  g.board.setMines([0, 2]); // 整盤只有兩顆雷
   g.initialSnap = g.snapshot();
-  eq(g.hint(), null, '還沒開局沒有提示');
-  g.reveal(1); // 2 的格子，周圍還有 5 格未翻，資訊不足
-  eq(g.hint(), null, '資訊不足時不該亂猜');
-  g.reveal(9);
-  g.reveal(10);
-  g.reveal(11); // 現在 index 1 周圍只剩 0 和 2 未翻，剛好等於數字 2 → 兩格都是雷
+  g.reveal(1); // 2，周圍還有 5 格未翻
+  g.flag(9, false); // 插錯旗：9 其實安全
   const h = g.hint();
-  ok(h && h.mine === 0, `應指出 index 0 是雷，得到 ${JSON.stringify(h)}`);
-  g.flag(0);
-  g.flag(2); // index 9 是 1，旗數已滿 → 其餘未翻的 18 安全
-  const h2 = g.hint();
-  ok(h2 && h2.safe === 18, `旗數等於數字時其餘格子安全，得到 ${JSON.stringify(h2)}`);
+  // 單格、兩格都推不出來；配合總雷數：兩顆雷都在 1 的周圍，其他格子全部安全
+  ok(h && h.safe != null && !g.board.mine[h.safe], `應提示一格真的安全的格子，得到 ${JSON.stringify(h)}`);
 });
 test('Classic：局號就是 seed，fromDeal 得到同一盤', () => {
   const a = Classic.fromDeal(4242, { level: 'expert' }).boot();
   const b = newGame({ level: 'expert' }, 4242);
   eq(Array.from(a.board.mine), Array.from(b.board.mine));
   eq(a.dealNumber, 4242);
+});
+
+// ---------- 求解器 ----------
+// 把某些格子標成已翻開，其餘未知
+function knowOf(b, open, mines = []) {
+  const k = new Uint8Array(b.n);
+  for (const i of open) k[i] = OPEN;
+  for (const i of mines) k[i] = MINE;
+  return k;
+}
+test('求解器：第 1 層單格推論', () => {
+  const b = board(3, 1, [0]); // [雷][1][0]
+  const d0 = deduce(b, knowOf(b, [2]), 1);
+  eq(d0.level, 1);
+  eq(d0.safe, [1], '0 旁邊的格子安全');
+  const d1 = deduce(b, knowOf(b, [1, 2]), 1);
+  eq(d1.mines, [0], '1 旁邊只剩一格就是雷');
+});
+test('求解器：第 2 層 1-2-1 型態', () => {
+  // 上排三格未知，下排 1 2 1：兩端是雷、中間安全
+  const b = board(3, 2, [0, 2]);
+  const d = deduce(b, knowOf(b, [3, 4, 5]), 2);
+  eq(d.level, 2, '單格推不出，要比較相鄰數字');
+  eq([...d.mines].sort(), [0, 2]);
+  const d2 = deduce(b, knowOf(b, [3, 4, 5], [0, 2]), 2);
+  eq(d2.safe, [1], '兩端確定是雷後，中間安全');
+});
+test('求解器：第 3 層用總雷數推出內部格安全', () => {
+  // [?][雷][1][?][?]：1 的兩側各一格有一顆雷，總共只有 1 顆，所以不相鄰的 0、4 都安全
+  const b = board(5, 1, [1]);
+  const d = deduce(b, knowOf(b, [2]), 1);
+  eq(d.level, 3);
+  eq([...d.safe].sort(), [0, 4]);
+  eq(deduce(b, knowOf(b, [2]), 1, { global: false }).level, 0, '不用全域就推不出來');
+});
+test('求解器：二選一推不出來', () => {
+  // 3×2，雷在左上角。從右下角開局：剩下左上與左下兩格，1 和 1 都只說其中一顆是雷
+  const b = board(3, 2, [0]);
+  const r = solveFrom(b, 5, { nodeLimit: 1e6 });
+  ok(!r.solved, '這盤一定要猜');
+  eq(deduce(b, r.know, 1).level, 0);
+  ok(solveFrom(board(3, 3, [0]), 8).solved, '沒有二選一的盤面解得完');
+});
+
+// ---------- 無猜產生器 ----------
+test('無猜產生器：同 seed 同盤面、雷數正確、起點是 0、從起點推得完', () => {
+  for (const [w, h, m] of [[9, 9, 10], [16, 16, 40], [30, 16, 99], [12, 20, 50]]) {
+    for (const seed of [1, 99, 123456]) {
+      const r = generateNoGuess(w, h, m, seed);
+      eq(generateNoGuess(w, h, m, seed).mines, r.mines, `${w}×${h} seed ${seed} 應可重現`);
+      ok(r.noGuess, `${w}×${h} seed ${seed} 應產生無猜盤面`);
+      eq(r.mines.length, m);
+      const b = board(w, h, r.mines);
+      ok(!b.mine[r.start] && b.count[r.start] === 0, '起點是 0');
+      ok(solveFrom(b, r.start, { nodeLimit: 1e6 }).solved, `${w}×${h} seed ${seed} 應從起點推得完`);
+    }
+  }
+});
+test('無猜產生器：盤面字串往返', () => {
+  const r = generateNoGuess(16, 16, 40, 7);
+  const back = decodeLayout(encodeLayout(r));
+  eq(back.start, r.start);
+  eq(back.mines, r.mines);
+});
+test('無猜：自訂雷數上限是 21%，高級剛好在內', () => {
+  eq(noGuessMaxMines(30, 16), 100);
+  eq(noGuessMaxMines(9, 9), 17);
+  eq(NoGuess.resolveSize({ level: 'custom', w: 10, h: 10, mines: 999 }).mines, 21);
+  eq(Classic.resolveSize({ level: 'custom', w: 10, h: 10, mines: 999 }).mines, 81, '經典不受影響');
+});
+test('無猜：第一下只能點起點，提示先指向起點', () => {
+  const g = new NoGuess(5, { level: 'intermediate' }).boot();
+  const s = g.startCell;
+  ok(s >= 0);
+  let msg = '';
+  g.on('message', (m) => (msg = m));
+  const other = s === 0 ? 1 : 0;
+  ok(!g.reveal(other), '不能從別的格子開局');
+  ok(msg.length > 0, '要告訴玩家先點起點');
+  eq(g.moves, 0);
+  eq(g.hint(), { safe: s });
+  ok(g.reveal(s));
+  ok(g.board.revealed >= 9, '起點是 0，會開出一片空地');
+});
+test('無猜：照提示一路走一定解得完', () => {
+  for (const [level, seed] of [['beginner', 3], ['intermediate', 4], ['expert', 5]]) {
+    const g = new NoGuess(seed, { level }).boot();
+    for (let step = 0; step < 2000 && !g.over; step++) {
+      const h = g.hint();
+      ok(h, `${level} 第 ${step} 步找不到提示`);
+      if (h.safe != null) g.reveal(h.safe);
+      else g.flag(h.mine, false);
+    }
+    ok(g.won, `${level} 應該解完`);
+  }
+});
+test('無猜：盤面存在 options 裡，存檔重開與回到開頭不會換盤', () => {
+  const g = new NoGuess(77, { level: 'intermediate' }).boot();
+  ok(typeof g.options.layout === 'string' && g.options.layout.includes(':'));
+  g.reveal(g.startCell);
+  const h = g.hint();
+  if (h.safe != null) g.reveal(h.safe);
+  const data = JSON.parse(JSON.stringify(g.serialize()));
+  const g2 = Game.deserialize(NoGuess, data);
+  eq(Array.from(g2.board.mine), Array.from(g.board.mine));
+  eq(g2.startCell, g.startCell);
+  eq(JSON.stringify(g2.snapshot()), JSON.stringify(g.snapshot()));
+  ok(g2.restart());
+  eq(g2.board.revealed, 0);
+  eq(Array.from(g2.board.mine), Array.from(g.board.mine), '回到開頭仍是同一盤');
+  // 同局號重新產生也是同一盤
+  eq(Array.from(new NoGuess(77, { level: 'intermediate' }).boot().board.mine), Array.from(g.board.mine));
+});
+
+// ---------- 蜂巢（六角格） ----------
+test('六角格：鄰居對稱、內部剛好 6 個、與幾何距離一致', () => {
+  const b = new Board(7, 6, 0, 'hex');
+  // 奇數列往右錯半格，相鄰六角格中心距離為 1
+  const c = (i) => { const x = i % 7, y = Math.floor(i / 7); return [x + (y % 2 ? 0.5 : 0), (y * Math.sqrt(3)) / 2]; };
+  for (let i = 0; i < b.n; i++) {
+    const x = i % 7, y = Math.floor(i / 7);
+    ok(b.nb[i].length <= 6);
+    if (x > 0 && x < 6 && y > 0 && y < 5) eq(b.nb[i].length, 6, `內部格 ${i}`);
+    for (let j = 0; j < b.n; j++) {
+      if (j === i) continue;
+      const [ax, ay] = c(i), [bx, by] = c(j);
+      const adj = Math.abs(Math.hypot(ax - bx, ay - by) - 1) < 1e-9;
+      eq(b.nb[i].includes(j), adj, `${i} 與 ${j} 的相鄰關係`);
+    }
+  }
+  eq(new Board(3, 3, 0).nb[4].length, 8, '方格不受影響');
+});
+test('六角格：翻開 0 會洪水填充、數字最大 6', () => {
+  const b = new Board(5, 5, 1, 'hex');
+  b.setMines([12]); // 正中央
+  eq(b.nb[12].every((j) => b.count[j] === 1), true);
+  b.reveal(0);
+  eq(b.revealed, 24, '只剩中央的雷沒翻');
+  ok(b.isWon());
+  const full = new Board(3, 3, 6, 'hex');
+  full.setMines(full.nb[4]);
+  eq(full.count[4], 6);
+});
+test('蜂巢：難度尺寸、一律無猜、格形為六角', () => {
+  const g = new Hex(1, { level: 'expert' }).boot();
+  eq([g.board.w, g.board.h, g.board.mines, g.board.shape], [15, 20, 65, 'hex']);
+  eq(g.subtitle(), '高級 15×20 · 65 雷');
+  ok(g.startCell >= 0 && g.board.count[g.startCell] === 0, '起點是 0');
+  ok(g instanceof NoGuess);
+  eq(Hex.resolveSize({ level: 'custom', w: 10, h: 10, mines: 999 }).mines, 21, '自訂上限 21%');
+  eq(noGuessMaxMines(3, 3, 'hex'), 1, '六角格起點與周圍只有 7 格');
+  eq(HEX_LEVELS.intermediate.mines, 30);
+});
+test('蜂巢：同局號同盤面，且與方格無猜不同', () => {
+  const a = new Hex(4242, { level: 'intermediate' }).boot();
+  const b = new Hex(4242, { level: 'intermediate' }).boot();
+  eq(a.options.layout, b.options.layout);
+  const r = generateNoGuess(10, 15, 30, 4242);
+  ok(encodeLayout(r) !== a.options.layout, '方格與六角格的盤面不同');
+});
+test('蜂巢：照提示一路走一定解得完，存檔往返不換盤', () => {
+  for (const [level, seed] of [['beginner', 8], ['intermediate', 9], ['expert', 10]]) {
+    const g = new Hex(seed, { level }).boot();
+    for (let step = 0; step < 2000 && !g.over; step++) {
+      const h = g.hint();
+      ok(h, `${level} 第 ${step} 步找不到提示`);
+      if (h.safe != null) g.reveal(h.safe);
+      else g.flag(h.mine, false);
+      if (step === 5) {
+        const g2 = Game.deserialize(Hex, JSON.parse(JSON.stringify(g.serialize())));
+        eq(JSON.stringify(g2.snapshot()), JSON.stringify(g.snapshot()), '存檔往返');
+        eq(g2.board.shape, 'hex');
+      }
+    }
+    ok(g.won, `${level} 應該解完`);
+  }
+});
+test('方格無猜：加入六角格前後同 seed 盤面不變', () => {
+  // 固定值：避免之後改到產生器時不小心讓舊局號對應到別的盤面
+  const r = generateNoGuess(30, 16, 99, 7919);
+  eq(r.start, 350);
+  eq(r.mines.slice(0, 5), [8, 17, 23, 25, 31]);
 });
 
 // ---------- 顯示 ----------

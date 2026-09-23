@@ -6,10 +6,16 @@ export const REVEALED = 1;
 export const FLAG = 2;
 export const QUESTION = 3;
 
+// 六角格（尖頂朝上、奇數列往右錯半格）的六個鄰居偏移，偶數列與奇數列不同
+const HEX_EVEN = [[-1, 0], [1, 0], [-1, -1], [0, -1], [-1, 1], [0, 1]];
+const HEX_ODD = [[-1, 0], [1, 0], [0, -1], [1, -1], [0, 1], [1, 1]];
+
 export class Board {
-  constructor(w, h, mines) {
+  // shape：'square' 方格（八個鄰居）或 'hex' 六角格（六個鄰居）。其餘邏輯都只看鄰居清單，跟格形無關
+  constructor(w, h, mines, shape = 'square') {
     this.w = w;
     this.h = h;
+    this.shape = shape;
     this.n = w * h;
     this.mines = mines;
     this.mine = new Uint8Array(this.n); // 1 = 有雷
@@ -29,6 +35,15 @@ export class Board {
     const x = i % this.w;
     const y = (i - x) / this.w;
     const out = [];
+    if (this.shape === 'hex') {
+      for (const [dx, dy] of y % 2 ? HEX_ODD : HEX_EVEN) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= this.w || ny >= this.h) continue;
+        out.push(ny * this.w + nx);
+      }
+      return out;
+    }
     for (let dy = -1; dy <= 1; dy++) {
       for (let dx = -1; dx <= 1; dx++) {
         if (!dx && !dy) continue;

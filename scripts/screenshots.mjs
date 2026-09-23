@@ -34,13 +34,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const PT = { w: 402, h: 874, status: 62, bottom: 40, landSide: 62, landBottom: 21 };
 
 // 每張圖：檔名、標題與副標，以及進 App 後要做的事（在頁面裡執行的程式）
-// 盤面用固定局號，重跑結果一樣；opens 是要翻開幾片空地、flags 是要插幾支旗
+// 盤面用固定局號，重跑結果一樣；opens 是要翻開幾片空地、flags 是要插幾支旗；
+// solve 是無猜盤面：點起點後照提示走幾步（每日挑戰的盤面由日期決定，換一天重跑會不同）
 const SHOTS = [
-  { file: 'home', t: '踩地雷，離線也能玩', s: '經典三級與自訂、每日挑戰，免費、無廣告、可離線' },
+  { file: 'home', t: '踩地雷，離線也能玩', s: '經典、無猜、蜂巢與每日挑戰，免費、無廣告' },
   { file: 'classic', t: '經典踩地雷', s: '初級、中級、高級與自訂尺寸，第一下永遠安全', start: ['classic', { deal: 20260918, level: 'beginner' }], opens: 3, flags: 3 },
-  { file: 'flags', t: '插旗與 chord', s: '長按插旗，點數字一次翻開周圍', start: ['classic', { deal: 1024, level: 'intermediate' }], opens: 4, flags: 6 },
-  { file: 'expert', t: '高級 30×16', s: '雙指縮放、單指拖曳，大盤面也能玩', start: ['classic', { deal: 99, level: 'expert' }], opens: 7, flags: 8, zoom: 12 },
-  { file: 'daily', t: '每日挑戰', s: '每天一盤中級，全世界同一局，連續天數累計', start: ['daily'], opens: 3, flags: 4 },
+  { file: 'noguess', t: '無猜踩地雷', s: '保證只靠推理就能解完，從亮起的起點開局', start: ['noguess', { deal: 1024, level: 'intermediate' }], solve: 45 },
+  { file: 'hex', t: '蜂巢踩地雷', s: '六角形格子、六個鄰居，一律不用猜', start: ['hex', { deal: 2024, level: 'expert' }], solve: 70 },
+  { file: 'expert', t: '高級 30×16', s: '直向時自動轉成直的，整盤一眼看完', start: ['classic', { deal: 99, level: 'expert' }], opens: 7, flags: 8 },
+  { file: 'daily', t: '每日挑戰', s: '每天一盤無猜中級，全世界同一局，連續天數累計', start: ['daily'], solve: 25 },
   { file: 'win', t: '完成統計', s: '時間、3BV、3BV/s 與連勝紀錄', start: ['classic', { deal: 777, level: 'beginner' }], win: true },
   { file: 'landscape', land: true, t: '直向、橫向都能玩', s: '橫向時按鈕列放在慣用手那一側', start: ['classic', { deal: 99, level: 'expert' }], opens: 7, flags: 8, zoom: 22 },
 ];
@@ -218,8 +220,19 @@ try {
       const [id, extra] = s.start;
       await evaluate(`(async () => {
         for (let i = 0; i < 100 && !window.__ms; i++) await new Promise((r) => setTimeout(r, 50));
-        __ms.start(${JSON.stringify(id)}, 'new', ${JSON.stringify(extra || {})});
+        await __ms.start(${JSON.stringify(id)}, 'new', ${JSON.stringify(extra || {})});
         const g = __ms.game, b = g.board;
+        if (${s.solve || 0}) {
+          // 無猜：點起點，再照提示走幾步（提示的雷就插旗）
+          if (g.startCell >= 0) g.reveal(g.startCell);
+          for (let k = 0; k < ${s.solve || 0} && !g.over; k++) {
+            const h = g.hint();
+            if (!h) break;
+            if (h.safe != null) g.reveal(h.safe);
+            else g.flag(h.mine, false);
+          }
+          return 'solve';
+        }
         if (${!!s.win}) {
           // 贏：先開一片空地讓計時器跑，停幾秒讓時間有數字，再把其餘安全格全翻開
           for (let i = 0; i < b.n; i++) if (!b.mine[i] && b.count[i] === 0) { g.reveal(i); break; }

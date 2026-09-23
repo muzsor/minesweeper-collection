@@ -1,11 +1,15 @@
 // 應用程式主體：畫面切換、設定、統計、存檔、每日挑戰、按鈕
 
 import { GAME_BY_ID } from './games/index.js';
-import { Classic, LEVELS, LEVEL_KEYS, CUSTOM_LIMITS, maxMines } from './games/classic.js';
+import { Classic, LEVELS, LEVEL_KEYS, CUSTOM_LIMITS } from './games/classic.js';
+import { NoGuess, NOGUESS_DENSITY } from './games/noguess.js';
+import { Hex } from './games/hex.js';
 import { Game } from './engine.js';
+import { FLAG } from './board.js';
 import { Renderer } from './render.js';
 import { RULES } from './rules.js';
 import { randomSeed, MAX_SEED, todayString, dailySeed } from './rng.js';
+import { generateNoGuess, encodeLayout } from './solver.js';
 import * as Sound from './sound.js';
 
 const $ = (s) => document.querySelector(s);
@@ -33,9 +37,29 @@ function remove(key) {
   } catch {}
 }
 
+// ---------- 模式 ----------
+// 首頁上有難度可選的模式。每個模式各自記住難度、自訂尺寸、存檔與每個難度的統計
+// 每日挑戰另外處理：固定中級無猜，一天一盤
+const MODES = {
+  classic: { Cls: Classic, level: 'level', custom: 'custom', stats: 'ms.stats.classic.', short: '經典' },
+  noguess: { Cls: NoGuess, level: 'nogLevel', custom: 'nogCustom', stats: 'ms.stats.noguess.', short: '無猜' },
+  hex: { Cls: Hex, level: 'hexLevel', custom: 'hexCustom', stats: 'ms.stats.hex.', short: '蜂巢' },
+};
+const MODE_IDS = Object.keys(MODES);
+const DAILY_LEVEL = 'intermediate';
+
+// id：classic / noguess / daily
+function classOf(id) {
+  return id === 'daily' ? NoGuess : MODES[id].Cls;
+}
+
 const DEFAULT_SETTINGS = {
   level: 'beginner',
   custom: { w: 12, h: 20, mines: 40 }, // 自訂尺寸的預設值：直向手機剛好塞滿一畫面
+  nogLevel: 'beginner',
+  nogCustom: { w: 12, h: 20, mines: 40 },
+  hexLevel: 'beginner',
+  hexCustom: { w: 12, h: 18, mines: 40 },
   hand: 'right', // 慣用手：橫向時按鈕列放在這一側
   undo: false, // 允許復原（含踩雷後救回）；預設關，和傳統玩法一樣
   question: false, // 插旗循環是否含問號
@@ -46,8 +70,12 @@ const DEFAULT_SETTINGS = {
 };
 function loadSettings() {
   const stored = load('ms.settings', {});
-  const s = { ...DEFAULT_SETTINGS, ...stored, custom: { ...DEFAULT_SETTINGS.custom, ...(stored.custom || {}) } };
-  if (!LEVEL_KEYS.includes(s.level)) s.level = 'beginner';
+  const s = { ...DEFAULT_SETTINGS, ...stored };
+  for (const mid of MODE_IDS) {
+    const M = MODES[mid];
+    s[M.custom] = { ...DEFAULT_SETTINGS[M.custom], ...(stored[M.custom] || {}) };
+    if (!LEVEL_KEYS.includes(s[M.level])) s[M.level] = 'beginner';
+  }
   if (s.hand !== 'left' && s.hand !== 'right') s.hand = 'right';
   return s;
 }
@@ -83,13 +111,13 @@ function applySettings() {
 }
 
 // ---------- 統計 ----------
-// 經典：每個難度各自一份；每日挑戰另存
+// 每個模式的每個難度各自一份；每日挑戰另存
 const EMPTY_STATS = { played: 0, won: 0, bestTime: null, streak: 0, bestStreak: 0 };
-function getStats(levelKey) {
-  return { ...EMPTY_STATS, ...load('ms.stats.classic.' + levelKey, {}) };
+function getStats(mid, levelKey) {
+  return { ...EMPTY_STATS, ...load(MODES[mid].stats + levelKey, {}) };
 }
-function setStats(levelKey, s) {
-  save('ms.stats.classic.' + levelKey, s);
+function setStats(mid, levelKey, s) {
+  save(MODES[mid].stats + levelKey, s);
 }
 const EMPTY_DAILY = { results: {}, streak: 0, bestStreak: 0 };
 function getDaily() {
@@ -100,7 +128,7 @@ function setDaily(d) {
   save('ms.daily', d);
 }
 function saveKey(id) {
-  return 'ms.save.' + id; // id：classic 或 daily
+  return 'ms.save.' + id;
 }
 function yesterdayString(today) {
   const [y, m, d] = today.split('-').map(Number);
@@ -112,6 +140,7 @@ let current = null; // { id, game, elapsed, runningSince, counted, lastRevealed 
 let renderer = null;
 let timerHandle = null;
 let flagMode = false;
+let starting = false; // 正在產生盤面，避免連點開兩局
 
 function fmtTime(ms, precise) {
   const total = ms / 1000;
@@ -130,10 +159,11 @@ function showScreen(name) {
   $('#game').classList.toggle('hidden', name !== 'game');
 }
 
-// 目前設定對應的經典難度選項
-function classicOptions() {
-  const o = { level: settings.level };
-  if (o.level === 'custom') Object.assign(o, settings.custom);
+// 目前設定對應的難度選項
+function levelOptions(mid) {
+  const M = MODES[mid];
+  const o = { level: settings[M.level] };
+  if (o.level === 'custom') Object.assign(o, settings[M.custom]);
   return o;
 }
 // 某一局的難度選項（輸入局號時要用同一種盤）
@@ -141,30 +171,34 @@ function levelOptionsOf(game) {
   const o = game.options;
   return { level: o.level, w: o.w, h: o.h, mines: o.mines };
 }
+// 三個模式的難度名稱相同（初級、中級、高級），只有尺寸不同，所以標籤共用經典的表
 function levelLabel(key, custom) {
   if (LEVELS[key]) return LEVELS[key].label;
   return custom ? `自訂 ${custom.w}×${custom.h}` : '自訂';
 }
+// 存檔裡是不是一局還沒結束、屬於這個模式的盤面
 function savedInProgress(id) {
   const saved = load(saveKey(id), null);
   const g = saved && saved.game;
   if (!g || !(g.moves > 0) || g.won || g.lost) return null;
+  if (g.id !== classOf(id).meta.id) return null; // 1.0 的每日挑戰是經典盤面，改版後不接續
   if (id === 'daily' && g.options.daily !== todayString()) return null; // 昨天沒打完的就算了
   return g;
 }
 
-function levelControl(useShort) {
-  const items = LEVEL_KEYS.map((k) => ({ v: k, label: k === 'custom' ? (useShort ? '自訂' : levelLabel('custom', settings.custom)) : LEVELS[k].label }));
-  const seg = segmented(items, settings.level, (v) => {
+function levelControl(mid, useShort) {
+  const M = MODES[mid];
+  const items = LEVEL_KEYS.map((k) => ({ v: k, label: k === 'custom' ? (useShort ? '自訂' : levelLabel('custom', settings[M.custom])) : LEVELS[k].label }));
+  const seg = segmented(items, settings[M.level], (v) => {
     if (v === 'custom') {
       // 先開尺寸對話框，確認後才算選了自訂
-      showCustomDialog(() => {
+      showCustomDialog(mid, () => {
         seg.set('custom');
         if (!current) renderHome();
       });
       return false;
     }
-    settings.level = v;
+    settings[M.level] = v;
     saveSettings();
     if (!current) renderHome();
   });
@@ -175,13 +209,15 @@ function renderHome() {
   const list = $('#game-list');
   list.innerHTML = '';
 
-  // ---- 經典踩地雷 ----
-  {
-    const m = Classic.meta;
-    const saved = savedInProgress('classic');
-    const st = getStats(settings.level);
+  // ---- 有難度可選的模式：經典、無猜 ----
+  for (const mid of MODE_IDS) {
+    const M = MODES[mid];
+    const m = M.Cls.meta;
+    const lvl = settings[M.level];
+    const saved = savedInProgress(mid);
+    const st = getStats(mid, lvl);
     const rate = st.played ? Math.round((st.won / st.played) * 100) : 0;
-    let statLine = `${levelLabel(settings.level, settings.custom)}：勝 ${st.won} / ${st.played} 局`;
+    let statLine = `${levelLabel(lvl, settings[M.custom])}：勝 ${st.won} / ${st.played} 局`;
     if (st.played) statLine += ` · ${rate}%`;
     if (st.bestTime) statLine += ` · 最佳 ${fmtTime(st.bestTime, true)}`;
     const chip = saved ? `<span class="chip">進行中 · ${levelLabel(saved.options.level, saved.options)}</span>` : '';
@@ -195,13 +231,11 @@ function renderHome() {
       </div>
       <div class="gcard-foot"></div>`;
     const foot = card.querySelector('.gcard-foot');
-    foot.appendChild(levelControl(false));
-    const spacer = document.createElement('span');
-    spacer.className = 'spacer';
-    foot.appendChild(spacer);
+    foot.appendChild(levelControl(mid, false));
+    const actions = cardActions(foot);
     if (saved) {
-      foot.append(
-        button('繼續', 'btn primary', () => startGame('classic', 'resume')),
+      actions.append(
+        button('繼續', 'btn primary', () => startGame(mid, 'resume')),
         button('新局', 'btn', () =>
           showModal({
             title: '發新局？',
@@ -212,8 +246,8 @@ function renderHome() {
                 label: '發新局',
                 primary: true,
                 onClick: () => {
-                  abandonSaved('classic');
-                  startGame('classic', 'new');
+                  abandonSaved(mid);
+                  startGame(mid, 'new');
                 },
               },
             ],
@@ -221,9 +255,9 @@ function renderHome() {
         )
       );
     } else {
-      foot.appendChild(button('開始', 'btn primary', () => startGame('classic', 'new')));
+      actions.appendChild(button('開始', 'btn primary', () => startGame(mid, 'new')));
     }
-    card.querySelector('.gcard-main').addEventListener('click', () => startGame('classic', saved ? 'resume' : 'new'));
+    card.querySelector('.gcard-main').addEventListener('click', () => startGame(mid, saved ? 'resume' : 'new'));
     list.appendChild(card);
   }
 
@@ -242,25 +276,30 @@ function renderHome() {
     card.innerHTML = `
       <div class="gcard-main">
         <div class="gcard-title">每日挑戰<span class="en">Daily</span>${chip}</div>
-        <div class="gcard-desc">每天一盤中級 16×16、40 雷，全世界同一局，每天只算一次。今天是 ${today}。</div>
+        <div class="gcard-desc">每天一盤無猜的中級 16×16、40 雷，全世界同一局，只靠推理就能解完，每天只算一次。今天是 ${today}。</div>
         <div class="gcard-stats">連續 ${daily.streak} 天 · 最長 ${daily.bestStreak} 天 · 完成 ${wonDays} 天</div>
       </div>
       <div class="gcard-foot"></div>`;
-    const foot = card.querySelector('.gcard-foot');
-    const spacer = document.createElement('span');
-    spacer.className = 'spacer';
-    foot.appendChild(spacer);
+    const actions = cardActions(card.querySelector('.gcard-foot'));
     if (res) {
       const note = document.createElement('span');
       note.className = 'gcard-stats';
       note.textContent = res.won ? '今天已完成，明天再來' : '今天已踩雷，明天再來';
-      foot.appendChild(note);
+      actions.appendChild(note);
     } else {
-      foot.appendChild(button(saved ? '繼續' : '開始', 'btn primary', () => startGame('daily', saved ? 'resume' : 'new')));
+      actions.appendChild(button(saved ? '繼續' : '開始', 'btn primary', () => startGame('daily', saved ? 'resume' : 'new')));
       card.querySelector('.gcard-main').addEventListener('click', () => startGame('daily', saved ? 'resume' : 'new'));
     }
     list.appendChild(card);
   }
+}
+
+// 卡片底部的按鈕組：「繼續」與「新局」包在同一組，空間不夠時整組一起換到下一行，不會被拆開；一律靠右
+function cardActions(foot) {
+  const actions = document.createElement('div');
+  actions.className = 'gcard-actions';
+  foot.appendChild(actions);
+  return actions;
 }
 
 function button(label, cls, onClick) {
@@ -297,14 +336,62 @@ function segmented(items, value, onChange) {
   return wrap;
 }
 
+// ---------- 無猜盤面產生 ----------
+// 在 Web Worker 產生，主畫面不會卡住；瀏覽器不支援模組 Worker 時退回主執行緒
+let worker = null; // null：還沒建立；false：不能用
+let workerSeq = 0;
+const workerJobs = new Map();
+const layoutNow = (job) => encodeLayout(generateNoGuess(job.w, job.h, job.mines, job.seed, job.shape));
+function generateLayout(w, h, mines, seed, shape) {
+  const job = { w, h, mines, seed, shape };
+  if (worker === null) {
+    try {
+      worker = new Worker(new URL('./noguess-worker.js', import.meta.url), { type: 'module' });
+      worker.onmessage = (e) => {
+        const r = workerJobs.get(e.data.id);
+        if (!r) return;
+        workerJobs.delete(e.data.id);
+        r.resolve(e.data.layout || layoutNow(r.job));
+      };
+      worker.onerror = () => {
+        try {
+          worker.terminate();
+        } catch {}
+        worker = false;
+        for (const r of workerJobs.values()) r.resolve(layoutNow(r.job));
+        workerJobs.clear();
+      };
+    } catch {
+      worker = false;
+    }
+  }
+  if (!worker) return new Promise((resolve) => setTimeout(() => resolve(layoutNow(job)), 30));
+  return new Promise((resolve) => {
+    const id = ++workerSeq;
+    workerJobs.set(id, { resolve, job });
+    worker.postMessage({ id, ...job });
+  });
+}
+// 產生超過一瞬間才顯示等待視窗，避免一閃而過
+function showWaiting(title) {
+  let m = null;
+  const t = setTimeout(() => {
+    m = showModal({ title, html: '<div class="spinner"></div><p class="note" style="text-align:center">保證不用猜的盤面需要多算一下</p>', sticky: true });
+  }, 250);
+  return () => {
+    clearTimeout(t);
+    if (m) m.close();
+  };
+}
+
 // ---------- 遊戲流程 ----------
 function abandonSaved(id) {
   const g = savedInProgress(id);
-  if (g && id === 'classic') {
+  if (g && MODES[id]) {
     const key = LEVELS[g.options.level] ? g.options.level : 'custom';
-    const st = getStats(key);
+    const st = getStats(id, key);
     st.streak = 0;
-    setStats(key, st);
+    setStats(id, key, st);
   }
   remove(saveKey(id));
 }
@@ -312,22 +399,24 @@ function abandonSaved(id) {
 function abandonCurrent() {
   if (!current) return;
   const g = current.game;
-  if (!g.over && g.moves > 0 && current.id === 'classic') {
-    const st = getStats(g.levelKey);
+  if (!g.over && g.moves > 0 && MODES[current.id]) {
+    const st = getStats(current.id, g.levelKey);
     st.streak = 0;
-    setStats(g.levelKey, st);
+    setStats(current.id, g.levelKey, st);
   }
   remove(saveKey(current.id));
 }
 
-function startGame(id, mode, extraOptions) {
-  const Cls = Classic;
-  let game = null;
-  let elapsed = 0;
-  const today = todayString();
-  if (mode === 'resume') {
-    const data = load(saveKey(id), null);
-    if (data && data.game && (id !== 'daily' || data.game.options.daily === today)) {
+async function startGame(id, mode, extraOptions) {
+  if (starting) return;
+  starting = true;
+  try {
+    const Cls = classOf(id);
+    let game = null;
+    let elapsed = 0;
+    const today = todayString();
+    if (mode === 'resume' && savedInProgress(id)) {
+      const data = load(saveKey(id), null);
       try {
         game = Game.deserialize(Cls, data.game);
         elapsed = data.elapsed || 0;
@@ -336,22 +425,36 @@ function startGame(id, mode, extraOptions) {
         game = null;
       }
     }
-  }
-  if (!game) {
-    if (id === 'daily') {
-      game = new Cls(dailySeed(today), { level: 'intermediate', daily: today });
-    } else if (mode === 'replay' && current && current.id === id) {
-      game = new Cls(current.game.seed, current.game.options);
-    } else {
-      const opts = { ...classicOptions(), ...(extraOptions || {}) };
-      // 指定局號（選單「輸入局號」）：局號就是種子
-      const deal = opts.deal;
-      delete opts.deal;
-      game = deal ? Cls.fromDeal(deal, opts) : new Cls(randomSeed(), opts);
+    if (!game) {
+      let seed;
+      let opts;
+      if (id === 'daily') {
+        seed = dailySeed(today);
+        opts = { level: DAILY_LEVEL, daily: today };
+      } else if (mode === 'replay' && current && current.id === id) {
+        seed = current.game.seed;
+        opts = { ...current.game.options };
+      } else {
+        opts = { ...levelOptions(id), ...(extraOptions || {}) };
+        // 指定局號（選單「輸入局號」）：局號就是種子
+        seed = opts.deal || randomSeed();
+        delete opts.deal;
+      }
+      if (Cls.needsLayout && !opts.layout) {
+        const size = Cls.resolveSize(opts);
+        const done = showWaiting('產生無猜盤面…');
+        try {
+          opts.layout = await generateLayout(size.w, size.h, size.mines, seed, Cls.shape);
+        } finally {
+          done();
+        }
+      }
+      game = new Cls(seed, opts).boot();
     }
-    game.boot();
+    setupGame(id, game, elapsed);
+  } finally {
+    starting = false;
   }
-  setupGame(id, game, elapsed);
 }
 
 function setupGame(id, game, elapsed) {
@@ -375,10 +478,10 @@ function onChange() {
   const g = current.game;
   if (!current.counted && g.moves > 0) {
     current.counted = true;
-    if (current.id === 'classic') {
-      const st = getStats(g.levelKey);
+    if (MODES[current.id]) {
+      const st = getStats(current.id, g.levelKey);
       st.played++;
-      setStats(g.levelKey, st);
+      setStats(current.id, g.levelKey, st);
     }
   }
   if (g.moves > 0 && !g.over) startTimer();
@@ -397,12 +500,13 @@ function onChange() {
 function onWin() {
   stopTimer();
   const g = current.game;
+  const id = current.id;
   const ms = current.elapsed;
   const bv = g.bv3();
   const bvs = ms > 0 ? bv / (ms / 1000) : 0;
   let streakLine = '';
   let newTime = false;
-  if (current.id === 'daily') {
+  if (id === 'daily') {
     const d = getDaily();
     const today = g.options.daily;
     d.results[today] = { won: true, time: ms };
@@ -412,16 +516,16 @@ function onWin() {
     setDaily(d);
     streakLine = `<div><span>連續天數</span><b>${d.streak}</b></div>`;
   } else {
-    const st = getStats(g.levelKey);
+    const st = getStats(id, g.levelKey);
     st.won++;
     st.streak++;
     st.bestStreak = Math.max(st.bestStreak, st.streak);
     newTime = ms > 0 && (st.bestTime == null || ms < st.bestTime);
     if (newTime) st.bestTime = ms;
-    setStats(g.levelKey, st);
+    setStats(id, g.levelKey, st);
     streakLine = `<div><span>連勝</span><b>${st.streak}</b></div>`;
   }
-  remove(saveKey(current.id));
+  remove(saveKey(id));
   updateHud();
   Sound.playWin();
   renderer.celebrate();
@@ -430,8 +534,8 @@ function onWin() {
       <div><span>3BV</span><b>${bv}</b></div>
       <div><span>3BV/s</span><b>${bvs.toFixed(2)}</b></div>
       ${streakLine}</div>`;
-  const buttons = [{ label: '回選單', onClick: goHome, primary: current.id === 'daily' }];
-  if (current.id !== 'daily') buttons.push({ label: '再玩一局', primary: true, onClick: () => startGame('classic', 'new') });
+  const buttons = [{ label: '回選單', onClick: goHome, primary: id === 'daily' }];
+  if (id !== 'daily') buttons.push({ label: '再玩一局', primary: true, onClick: () => startGame(id, 'new') });
   setTimeout(() => showModal({ title: '🎉 掃雷成功！', html, sticky: true, buttons }), 800);
 }
 
@@ -446,9 +550,9 @@ function onLose() {
     d.streak = 0;
     setDaily(d);
   } else {
-    const st = getStats(g.levelKey);
+    const st = getStats(id, g.levelKey);
     st.streak = 0;
-    setStats(g.levelKey, st);
+    setStats(id, g.levelKey, st);
   }
   remove(saveKey(id));
   updateHud();
@@ -459,11 +563,13 @@ function onLose() {
     } catch {}
   }
   const pct = Math.round(g.progress() * 100);
+  let note = '';
+  if (id === 'daily') note = '<p class="note">每日挑戰每天只算一次，明天再來。</p>';
+  else if (g instanceof NoGuess) note = '<p class="note">無猜盤面一定推得出來，這一下是推錯或手滑了。</p>';
   const html = `<div class="win-stats">
       <div><span>時間</span><b>${fmtTime(ms, true)}</b></div>
       <div><span>進度</span><b>${pct}%</b></div>
-      <div><span>剩餘地雷</span><b>${g.minesLeft()}</b></div></div>`
-    + (id === 'daily' ? '<p class="note">每日挑戰每天只算一次，明天再來。</p>' : '');
+      <div><span>剩餘地雷</span><b>${g.minesLeft()}</b></div></div>${note}`;
   const buttons = [{ label: '回選單', onClick: goHome, primary: id === 'daily' }];
   if (id !== 'daily') {
     if (settings.undo) {
@@ -475,7 +581,7 @@ function onLose() {
       });
     }
     buttons.push({ label: '同一盤重來', onClick: restartCurrent });
-    buttons.push({ label: '再玩一局', primary: true, onClick: () => startGame('classic', 'new') });
+    buttons.push({ label: '再玩一局', primary: true, onClick: () => startGame(id, 'new') });
   }
   setTimeout(() => showModal({ title: '💥 踩到地雷了', html, sticky: true, buttons }), 700);
 }
@@ -620,23 +726,33 @@ function hideToast() {
   $('#toast').classList.remove('show');
 }
 
+// 無猜與每日挑戰的規則都建立在經典規則上，接在後面一起顯示
 function showRules(id) {
-  const html = id === 'daily' ? RULES.daily + RULES.classic : RULES[id] || '';
+  let html = RULES.classic;
+  if (id === 'noguess') html = RULES.noguess + html;
+  if (id === 'hex') html = RULES.hex + RULES.noguess + html;
+  if (id === 'daily') html = RULES.daily + RULES.noguess + html;
   const title = id === 'daily' ? '每日挑戰 規則' : `${GAME_BY_ID[id].meta.name} 規則`;
   showModal({ title, html, buttons: [{ label: '知道了', primary: true }] });
 }
 
-function showStats() {
-  let html = '';
-  for (const key of LEVEL_KEYS) {
-    const st = getStats(key);
-    if (!st.played && key === 'custom') continue;
-    const rate = st.played ? Math.round((st.won / st.played) * 100) : 0;
-    html += `<h3>${levelLabel(key)}</h3><table class="stats">
+function statsTable(st) {
+  const rate = st.played ? Math.round((st.won / st.played) * 100) : 0;
+  return `<table class="stats">
       <tr><td>局數</td><td>${st.played}</td><td>勝場</td><td>${st.won}</td></tr>
       <tr><td>勝率</td><td>${rate}%</td><td>最佳時間</td><td>${st.bestTime ? fmtTime(st.bestTime, true) : '—'}</td></tr>
       <tr><td>目前連勝</td><td>${st.streak}</td><td>最長連勝</td><td>${st.bestStreak}</td></tr>
     </table>`;
+}
+
+function showStats() {
+  let html = '';
+  for (const mid of MODE_IDS) {
+    for (const key of LEVEL_KEYS) {
+      const st = getStats(mid, key);
+      if (!st.played && key === 'custom') continue;
+      html += `<h3>${MODES[mid].short} · ${levelLabel(key)}</h3>${statsTable(st)}`;
+    }
   }
   const d = getDaily();
   const results = Object.values(d.results);
@@ -656,14 +772,14 @@ function showStats() {
         onClick: () =>
           showModal({
             title: '確定清除？',
-            html: '<p>會刪除所有難度與每日挑戰的紀錄，無法復原。</p>',
+            html: '<p>會刪除所有模式、難度與每日挑戰的紀錄，無法復原。</p>',
             buttons: [
               { label: '取消' },
               {
                 label: '清除',
                 primary: true,
                 onClick: () => {
-                  for (const key of LEVEL_KEYS) remove('ms.stats.classic.' + key);
+                  for (const mid of MODE_IDS) for (const key of LEVEL_KEYS) remove(MODES[mid].stats + key);
                   remove('ms.daily');
                   if (!current) renderHome();
                 },
@@ -706,7 +822,7 @@ function showSettings() {
       saveSettings();
     });
 
-  row('難度', levelControl(true));
+  for (const mid of MODE_IDS) row(`${MODES[mid].short}難度`, levelControl(mid, true));
   row(
     '慣用手',
     seg('hand', [
@@ -733,7 +849,7 @@ function showSettings() {
   rows.forEach((r) => body.appendChild(r));
   const note = document.createElement('p');
   note.className = 'note';
-  note.textContent = '難度會在下一局生效。慣用手決定橫向時按鈕列放哪一側。允許復原後踩雷也能救回，但那樣的勝場只是休閒。';
+  note.textContent = '難度會在下一局生效，經典與無猜各自記住。慣用手決定橫向時按鈕列放哪一側。允許復原後踩雷也能救回，但那樣的勝場只是休閒。';
   body.appendChild(note);
   const dataRow = document.createElement('div');
   dataRow.className = 'setting-row';
@@ -747,13 +863,17 @@ function showSettings() {
   body.appendChild(dataRow);
 }
 
-// 自訂尺寸：寬、高 5–40，雷數 1 到 (寬−1)×(高−1)
-function showCustomDialog(onDone) {
-  const c = settings.custom;
+// 自訂尺寸：寬、高 5–40；雷數上限經典是 (寬−1)×(高−1)，無猜是格子數的 21%
+function showCustomDialog(mid, onDone) {
+  const M = MODES[mid];
+  const c = settings[M.custom];
+  const limitNote = M.Cls.needsLayout
+    ? `雷數最多是格子數的 ${Math.round(NOGUESS_DENSITY * 100)}%，太密就產生不出不用猜的盤面`
+    : '雷數最多 (寬−1)×(高−1)';
   const noAuto = 'type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" class="num-input"';
   const m = showModal({
-    title: '自訂盤面',
-    html: `<p class="note deal-note">寬、高 ${CUSTOM_LIMITS.minW} 到 ${CUSTOM_LIMITS.maxW}，雷數最多 (寬−1)×(高−1)。太大的盤面可以拖曳捲動。</p>
+    title: `自訂盤面（${M.short}）`,
+    html: `<p class="note deal-note">寬、高 ${CUSTOM_LIMITS.minW} 到 ${CUSTOM_LIMITS.maxW}，${limitNote}。太大的盤面可以拖曳捲動。</p>
       <div class="custom-grid">
         <label>寬<input id="cw" ${noAuto} value="${c.w}"></label>
         <label>高<input id="ch" ${noAuto} value="${c.h}"></label>
@@ -775,13 +895,13 @@ function showCustomDialog(onDone) {
             err.textContent = `寬和高必須在 ${CUSTOM_LIMITS.minW} 到 ${CUSTOM_LIMITS.maxW} 之間`;
             return;
           }
-          const max = maxMines(w, h);
+          const max = M.Cls.maxMinesFor(w, h);
           if (!(mines >= CUSTOM_LIMITS.minMines && mines <= max)) {
-            err.textContent = `雷數必須在 ${CUSTOM_LIMITS.minMines} 到 ${max} 之間`;
+            err.textContent = `${w}×${h} 的雷數必須在 ${CUSTOM_LIMITS.minMines} 到 ${max} 之間`;
             return;
           }
-          settings.custom = { w, h, mines };
-          settings.level = 'custom';
+          settings[M.custom] = { w, h, mines };
+          settings[M.level] = 'custom';
           saveSettings();
           m.close();
           onDone && onDone();
@@ -934,7 +1054,7 @@ function applyImported(result) {
 
 // 標題列副標：每日挑戰顯示日期；其他顯示局號加難度，例如「第 123456 局 · 中級 16×16 · 40 雷」
 function dealLabel(game) {
-  if (game.options.daily) return `${game.options.daily} · ${game.subtitle()}`;
+  if (game.options.daily) return `${game.options.daily} · 無猜 · ${game.subtitle()}`;
   return `第 ${game.dealNumber} 局 · ${game.subtitle()}`;
 }
 
@@ -944,7 +1064,7 @@ function showDealCode() {
   const n = String(g.dealNumber);
   const m = showModal({
     title: '局號',
-    html: `<p class="deal-code">${n}</p><p class="note deal-note" style="text-align:center">${g.subtitle()}，同難度輸入這個局號會得到同一盤</p><p id="deal-copy-msg" class="note deal-copy-msg"></p>`,
+    html: `<p class="deal-code">${n}</p><p class="note deal-note" style="text-align:center">${g.meta.name}・${g.subtitle()}，同模式同難度輸入這個局號會得到同一盤</p><p id="deal-copy-msg" class="note deal-copy-msg"></p>`,
     buttons: [{ label: '關閉' }, { label: '複製', primary: true, noClose: true, onClick: () => copyDealCode() }],
   });
   const copyDealCode = async () => {
@@ -978,14 +1098,14 @@ function showMenu() {
   item('回到選單', goHome);
 }
 
-// 輸入局號開新局：用目前這局的難度，局號上限 2^31 − 1
+// 輸入局號開新局：用目前這局的模式與難度，局號上限 2^31 − 1
 function showDealInput() {
   const g = current.game;
   const max = MAX_SEED;
   const digits = String(max).length;
   const m = showModal({
     title: '輸入局號',
-    html: `<p>輸入 1 到 ${max} 之間的局號，就能玩到和別人同一盤（${g.subtitle()}）。目前是第 ${g.dealNumber} 局。</p><input id="deal-input" class="deal-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="${digits}" autocomplete="off" enterkeyhint="go" placeholder="例如 ${g.dealNumber}"><p id="deal-err" class="field-err"></p>`,
+    html: `<p>輸入 1 到 ${max} 之間的局號，就能玩到和別人同一盤（${g.meta.name}・${g.subtitle()}）。目前是第 ${g.dealNumber} 局。</p><input id="deal-input" class="deal-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="${digits}" autocomplete="off" enterkeyhint="go" placeholder="例如 ${g.dealNumber}"><p id="deal-err" class="field-err"></p>`,
     buttons: [
       { label: '取消' },
       {
@@ -1047,11 +1167,19 @@ function showHint() {
   if (g.over) return;
   const h = g.hint();
   if (!h) {
-    toast(g.board.revealed === 0 ? '先隨便點一格開局，第一下不會踩雷' : '目前沒有能確定的格子，只能猜一下了');
+    if (g.board.revealed === 0) toast('先隨便點一格開局，第一下不會踩雷');
+    else if (g instanceof NoGuess) toast('目前推不出能確定的格子，檢查看看有沒有插錯的旗');
+    else toast('目前沒有能確定的格子，只能猜一下了');
     return;
   }
+  // 確定是雷：直接幫忙插旗（算一步，可以復原）。問號狀態要按兩次才會變成旗
+  if (h.mine != null) {
+    for (let k = 0; k < 2 && g.board.state[h.mine] !== FLAG; k++) g.flag(h.mine, settings.question);
+  }
+  // 先插旗再閃：插旗會重畫格子，閃爍的 class 要加在重畫之後
   renderer.showHint(h);
-  toast(h.safe != null ? '綠框的格子確定安全' : '紅框的格子確定是雷');
+  if (g.board.revealed === 0 && h.safe === g.startCell) toast('從閃爍的起點開始');
+  else toast(h.safe != null ? '綠色的格子確定安全' : '紅色的格子是雷，已幫你插旗');
 }
 
 // ---------- 轉向補救 ----------
@@ -1198,7 +1326,7 @@ function init() {
   const kick = installRotationFix();
   registerSW();
   // 除錯用：在主控台可透過 __ms.game 取得目前遊戲，__ms.kick() 手動觸發轉向補救；
-  // __ms.start 與 __ms.renderer 給 scripts/screenshots.mjs 用固定局號開局、調整縮放
+  // __ms.start（回傳 Promise）與 __ms.renderer 給 scripts/screenshots.mjs 用固定局號開局、調整縮放
   window.__ms = {
     get game() {
       return current && current.game;
